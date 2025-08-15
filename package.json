@@ -29,7 +29,11 @@
     "ember-cli",
     "model-context-protocol"
   ],
-  "author": "Stefano Amorelli <stefano@amorelli.tech>",
+  "author": {
+    "name": "Stefano Amorelli",
+    "email": "stefano@amorelli.tech",
+    "url": "https://amorelli.tech"
+  },
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^0.5.0"
