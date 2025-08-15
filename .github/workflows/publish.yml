@@ -1,0 +1,102 @@
+name: Publish to npm
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (leave empty to use package.json version)'
+        required: false
+        type: string
+      tag:
+        description: 'npm tag (latest, beta, next)'
+        required: false
+        default: 'latest'
+        type: choice
+        options:
+          - latest
+          - beta
+          - next
+          - canary
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Use Node.js 20.x
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20.x'
+        cache: 'npm'
+    
+    - name: Install dependencies
+      run: npm ci
+    
+    - name: Build
+      run: npm run build
+    
+    - name: Run tests
+      run: node test-mcp.js
+    
+    - name: Check TypeScript
+      run: npx tsc --noEmit
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Use Node.js 20.x
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20.x'
+        registry-url: 'https://registry.npmjs.org'
+        cache: 'npm'
+    
+    - name: Install dependencies
+      run: npm ci
+    
+    - name: Build
+      run: npm run build
+    
+    - name: Update version if provided
+      if: github.event.inputs.version != ''
+      run: npm version ${{ github.event.inputs.version }} --no-git-tag-version
+    
+    - name: Set npm tag
+      id: npm-tag
+      run: |
+        if [ "${{ github.event_name }}" == "release" ]; then
+          # For releases, check if it's a prerelease
+          if [ "${{ github.event.release.prerelease }}" == "true" ]; then
+            echo "tag=beta" >> $GITHUB_OUTPUT
+          else
+            echo "tag=latest" >> $GITHUB_OUTPUT
+          fi
+        else
+          # For manual dispatch, use the input or default to latest
+          echo "tag=${{ github.event.inputs.tag || 'latest' }}" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: Publish to npm
+      run: npm publish --provenance --access public --tag ${{ steps.npm-tag.outputs.tag }}
+      env:
+        NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+    
+    - name: Create GitHub Release Summary
+      if: success()
+      run: |
+        echo "### 📦 Published to npm" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "- **Package**: ember-cli-mcp" >> $GITHUB_STEP_SUMMARY
+        echo "- **Version**: $(node -p "require('./package.json').version")" >> $GITHUB_STEP_SUMMARY
+        echo "- **Tag**: ${{ steps.npm-tag.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Registry**: https://www.npmjs.com/package/ember-cli-mcp" >> $GITHUB_STEP_SUMMARY
