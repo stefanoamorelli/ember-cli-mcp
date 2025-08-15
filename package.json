@@ -1,6 +1,6 @@
 {
   "name": "ember-cli-mcp",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "MCP server for Ember CLI commands and utilities",
   "main": "dist/index.js",
   "type": "module",
@@ -19,7 +19,7 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "start": "node dist/index.js",
-    "test": "npm run build && node test-mcp.js",
+    "test": "npm run build && node test/test-mcp.js",
     "clean": "rm -rf dist",
     "prepublishOnly": "npm run clean && npm run build && npm test"
   },

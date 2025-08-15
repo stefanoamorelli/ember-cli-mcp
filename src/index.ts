@@ -301,6 +301,7 @@ const EMBER_BLUEPRINTS = [
 class EmberCliMcpServer {
   private server: Server;
   private runningProcesses: Map<string, any> = new Map();
+  private testServerInfo: { port: number; processId: string } | null = null;
 
   constructor() {
     this.server = new Server(
@@ -418,6 +419,51 @@ class EmberCliMcpServer {
             },
           },
         },
+        {
+          name: "ember_test_server_run",
+          description: "Run tests against an already running test server (avoids recompilation)",
+          inputSchema: {
+            type: "object" as const,
+            properties: {
+              filter: {
+                type: "string" as const,
+                description: "Test filter pattern to run specific tests",
+              },
+              module: {
+                type: "string" as const,
+                description: "Run tests from a specific module",
+              },
+              port: {
+                type: "number" as const,
+                description: "Port where test server is running (default: 7357)",
+                default: 7357,
+              },
+              host: {
+                type: "string" as const,
+                description: "Host where test server is running (default: localhost)",
+                default: "localhost",
+              },
+            },
+          },
+        },
+        {
+          name: "ember_test_server_start",
+          description: "Start a persistent test server in the background for running tests without recompilation",
+          inputSchema: {
+            type: "object" as const,
+            properties: {
+              port: {
+                type: "number" as const,
+                description: "Port to run test server on (default: 7357)",
+                default: 7357,
+              },
+              cwd: {
+                type: "string" as const,
+                description: "Working directory",
+              },
+            },
+          },
+        },
       ],
     }));
 
@@ -444,6 +490,14 @@ class EmberCliMcpServer {
 
         if (name === "ember_stop_server") {
           return await this.stopServer(args as any);
+        }
+
+        if (name === "ember_test_server_start") {
+          return await this.startTestServer(args as any);
+        }
+
+        if (name === "ember_test_server_run") {
+          return await this.runTestsOnServer(args as any);
         }
 
         if (name.startsWith("ember_")) {
@@ -956,6 +1010,137 @@ Usage Examples:
       return count;
     } catch {
       return 0;
+    }
+  }
+
+  private async startTestServer(args: { port?: number; cwd?: string }) {
+    const port = args.port || 7357;
+    const cwd = args.cwd || process.cwd();
+    
+    // Stop any existing test server
+    if (this.testServerInfo) {
+      const existingProcess = this.runningProcesses.get(this.testServerInfo.processId);
+      if (existingProcess) {
+        existingProcess.kill();
+        this.runningProcesses.delete(this.testServerInfo.processId);
+      }
+    }
+    
+    // Start new test server
+    const processId = `test_server_${Date.now()}`;
+    const child = spawn("ember", ["test", "--server", "--port", port.toString()], {
+      cwd,
+      env: { ...process.env, FORCE_COLOR: "0" },
+      shell: true,
+    });
+    
+    this.runningProcesses.set(processId, child);
+    this.testServerInfo = { port, processId };
+    
+    let output = "";
+    let serverReady = false;
+    
+    return new Promise<any>((resolve) => {
+      const checkReady = (data: Buffer) => {
+        output += data.toString();
+        if (!serverReady && output.includes("Serving on") || output.includes("Test server started")) {
+          serverReady = true;
+          resolve({
+            content: [
+              {
+                type: "text" as const,
+                text: `Test server started on http://localhost:${port}\nProcess ID: ${processId}\n\nYou can now run tests using ember_test_server_run without recompilation.\nAccess the test interface at: http://localhost:${port}/tests`,
+              },
+            ],
+          });
+        }
+      };
+      
+      child.stdout.on("data", checkReady);
+      child.stderr.on("data", checkReady);
+      
+      // Timeout fallback
+      setTimeout(() => {
+        if (!serverReady) {
+          resolve({
+            content: [
+              {
+                type: "text" as const,
+                text: `Test server starting on port ${port}...\nProcess ID: ${processId}\nIt may take a moment to fully start.\n\nAccess at: http://localhost:${port}/tests`,
+              },
+            ],
+          });
+        }
+      }, 5000);
+    });
+  }
+  
+  private async runTestsOnServer(args: { 
+    filter?: string; 
+    module?: string; 
+    port?: number; 
+    host?: string;
+  }) {
+    const port = args.port || this.testServerInfo?.port || 7357;
+    const host = args.host || "localhost";
+    
+    // Build query parameters for the test URL
+    const params = new URLSearchParams();
+    if (args.filter) {
+      params.append("filter", args.filter);
+    }
+    if (args.module) {
+      params.append("module", args.module);
+    }
+    
+    const testUrl = `http://${host}:${port}/tests${params.toString() ? "?" + params.toString() : ""}`;
+    
+    try {
+      // Use curl to trigger the tests and get results
+      const curlCommand = `curl -s "${testUrl}" | grep -E "(passed|failed|Test.*finished)" | tail -20`;
+      const { stdout, stderr } = await execAsync(curlCommand);
+      
+      // Also try to get test results via the API if available
+      const apiUrl = `http://${host}:${port}/tests/results`;
+      let apiResult = "";
+      try {
+        const apiCommand = `curl -s "${apiUrl}"`;
+        const apiResponse = await execAsync(apiCommand);
+        apiResult = apiResponse.stdout;
+      } catch {
+        // API might not be available
+      }
+      
+      const output = `Running tests on server at ${testUrl}\n\n` +
+        `Filter: ${args.filter || "none"}\n` +
+        `Module: ${args.module || "all"}\n\n` +
+        `To view in browser: ${testUrl}\n\n` +
+        `Note: Test results will appear in the terminal where the test server is running.\n` +
+        `You can also open the URL in a browser to see live results.\n` +
+        (apiResult ? `\nAPI Results:\n${apiResult}` : "") +
+        (stdout ? `\nPage snapshot:\n${stdout}` : "");
+      
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: output,
+          },
+        ],
+      };
+    } catch (error: any) {
+      // If curl fails, just provide the URL
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Test server URL configured: ${testUrl}\n\n` +
+                  `Open this URL in your browser to run the tests.\n` +
+                  `The test server must be running on port ${port}.\n\n` +
+                  `Tip: Use 'ember_test_server_start' first if the server isn't running.`,
+          },
+        ],
+      };
     }
   }
 
