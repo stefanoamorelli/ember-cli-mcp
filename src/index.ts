@@ -962,7 +962,6 @@ Usage Examples:
   async run() {
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
-    console.error("Ember CLI MCP server v0.2.0 running on stdio");
   }
 }
 
