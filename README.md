@@ -14,16 +14,7 @@ This MCP server lets any MCP client (like [Claude Code](https://docs.anthropic.c
 
 ### With [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
 
-Install directly via Claude Code CLI:
-```bash
-# User-level installation (available across all projects)
-claude mcp add ember-cli -s user -- npx -y ember-cli-mcp
-
-# Or project-level installation
-claude mcp add ember-cli -- npx -y ember-cli-mcp
-```
-
-Or install globally first:
+Install globally first:
 ```bash
 npm install -g ember-cli-mcp
 claude mcp add ember-cli -s user -- ember-cli-mcp
