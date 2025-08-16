@@ -1,6 +1,6 @@
 {
   "name": "ember-cli-mcp",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "MCP server for Ember CLI commands and utilities",
   "main": "dist/index.js",
   "type": "module",
