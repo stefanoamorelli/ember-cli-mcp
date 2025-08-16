@@ -11,6 +11,8 @@ import { promisify } from "util";
 import { readdir, stat, readFile } from "fs/promises";
 import { join } from "path";
 import { existsSync } from "fs";
+import * as fs from "fs/promises";
+import * as path from "path";
 
 const execAsync = promisify(exec);
 
@@ -421,7 +423,7 @@ class EmberCliMcpServer {
         },
         {
           name: "ember_test_server_run",
-          description: "Run tests against an already running test server (avoids recompilation)",
+          description: "Run tests using pre-built test files (requires ember_test_server_start or ember build --environment=test to be run first)",
           inputSchema: {
             type: "object" as const,
             properties: {
@@ -433,22 +435,22 @@ class EmberCliMcpServer {
                 type: "string" as const,
                 description: "Run tests from a specific module",
               },
-              port: {
-                type: "number" as const,
-                description: "Port where test server is running (default: 7357)",
-                default: 7357,
-              },
-              host: {
+              cwd: {
                 type: "string" as const,
-                description: "Host where test server is running (default: localhost)",
-                default: "localhost",
+                description: "Working directory",
+              },
+              reporter: {
+                type: "string" as const,
+                description: "Test reporter format (tap, dot, xunit)",
+                enum: ["tap", "dot", "xunit"],
+                default: "tap",
               },
             },
           },
         },
         {
           name: "ember_test_server_start",
-          description: "Start a persistent test server in the background for running tests without recompilation",
+          description: "Build app for testing and start a test server for browser-based testing",
           inputSchema: {
             type: "object" as const,
             properties: {
@@ -460,6 +462,11 @@ class EmberCliMcpServer {
               cwd: {
                 type: "string" as const,
                 description: "Working directory",
+              },
+              build: {
+                type: "boolean" as const,
+                description: "Build the app for test environment first (default: true)",
+                default: true,
               },
             },
           },
@@ -1013,9 +1020,10 @@ Usage Examples:
     }
   }
 
-  private async startTestServer(args: { port?: number; cwd?: string }) {
+  private async startTestServer(args: { port?: number; cwd?: string; build?: boolean }) {
     const port = args.port || 7357;
     const cwd = args.cwd || process.cwd();
+    const shouldBuild = args.build !== false; // Default to true
     
     // Stop any existing test server
     if (this.testServerInfo) {
@@ -1023,6 +1031,23 @@ Usage Examples:
       if (existingProcess) {
         existingProcess.kill();
         this.runningProcesses.delete(this.testServerInfo.processId);
+      }
+    }
+    
+    // Build for test environment first if requested
+    if (shouldBuild) {
+      try {
+        const buildResult = await execAsync("ember build --environment=test", { cwd });
+        console.log("Test build completed");
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Failed to build for test environment: ${error}`,
+            },
+          ],
+        };
       }
     }
     
@@ -1043,13 +1068,13 @@ Usage Examples:
     return new Promise<any>((resolve) => {
       const checkReady = (data: Buffer) => {
         output += data.toString();
-        if (!serverReady && output.includes("Serving on") || output.includes("Test server started")) {
+        if (!serverReady && (output.includes("Serving on") || output.includes("Test server started") || output.includes("testem started"))) {
           serverReady = true;
           resolve({
             content: [
               {
                 type: "text" as const,
-                text: `Test server started on http://localhost:${port}\nProcess ID: ${processId}\n\nYou can now run tests using ember_test_server_run without recompilation.\nAccess the test interface at: http://localhost:${port}/tests`,
+                text: `Test server started on http://localhost:${port}\nProcess ID: ${processId}\n\nYou can now:\n1. Open http://localhost:${port}/tests in a browser to run tests interactively\n2. Use ember_test_server_run to run tests programmatically`,
               },
             ],
           });
@@ -1071,73 +1096,67 @@ Usage Examples:
             ],
           });
         }
-      }, 5000);
+      }, 10000);
     });
   }
   
   private async runTestsOnServer(args: { 
     filter?: string; 
     module?: string; 
-    port?: number; 
-    host?: string;
+    cwd?: string;
+    reporter?: string;
   }) {
-    const port = args.port || this.testServerInfo?.port || 7357;
-    const host = args.host || "localhost";
+    const cwd = args.cwd || process.cwd();
+    const reporter = args.reporter || "tap";
     
-    // Build query parameters for the test URL
-    const params = new URLSearchParams();
+    // Check if dist directory exists (from test build)
+    const distPath = path.join(cwd, "dist");
+    try {
+      await fs.access(distPath);
+    } catch {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `No test build found at ${distPath}.\n\nRun 'ember_test_server_start' first to create a test build, or run 'ember build --environment=test' manually.`,
+          },
+        ],
+      };
+    }
+    
+    // Build the ember test command with --path to use existing build
+    const testArgs = ["test", "--path", distPath, "--reporter", reporter];
+    
     if (args.filter) {
-      params.append("filter", args.filter);
+      testArgs.push("--filter", args.filter);
     }
     if (args.module) {
-      params.append("module", args.module);
+      testArgs.push("--module", args.module);
     }
     
-    const testUrl = `http://${host}:${port}/tests${params.toString() ? "?" + params.toString() : ""}`;
-    
     try {
-      // Use curl to trigger the tests and get results
-      const curlCommand = `curl -s "${testUrl}" | grep -E "(passed|failed|Test.*finished)" | tail -20`;
-      const { stdout, stderr } = await execAsync(curlCommand);
-      
-      // Also try to get test results via the API if available
-      const apiUrl = `http://${host}:${port}/tests/results`;
-      let apiResult = "";
-      try {
-        const apiCommand = `curl -s "${apiUrl}"`;
-        const apiResponse = await execAsync(apiCommand);
-        apiResult = apiResponse.stdout;
-      } catch {
-        // API might not be available
-      }
-      
-      const output = `Running tests on server at ${testUrl}\n\n` +
-        `Filter: ${args.filter || "none"}\n` +
-        `Module: ${args.module || "all"}\n\n` +
-        `To view in browser: ${testUrl}\n\n` +
-        `Note: Test results will appear in the terminal where the test server is running.\n` +
-        `You can also open the URL in a browser to see live results.\n` +
-        (apiResult ? `\nAPI Results:\n${apiResult}` : "") +
-        (stdout ? `\nPage snapshot:\n${stdout}` : "");
+      // Run tests using the pre-built dist directory
+      const { stdout, stderr } = await execAsync(`ember ${testArgs.join(" ")}`, { 
+        cwd,
+        env: { ...process.env, CI: "true" } // Set CI to avoid browser launch
+      });
       
       return {
         content: [
           {
             type: "text" as const,
-            text: output,
+            text: stdout || stderr || "Tests completed. Check console output for details.",
           },
         ],
       };
     } catch (error: any) {
-      // If curl fails, just provide the URL
+      // Even on test failures, we want to show the output
+      const output = error.stdout || error.stderr || error.message;
       return {
         content: [
           {
             type: "text" as const,
-            text: `Test server URL configured: ${testUrl}\n\n` +
-                  `Open this URL in your browser to run the tests.\n` +
-                  `The test server must be running on port ${port}.\n\n` +
-                  `Tip: Use 'ember_test_server_start' first if the server isn't running.`,
+            text: `Test run completed with errors:\n\n${output}`,
           },
         ],
       };
