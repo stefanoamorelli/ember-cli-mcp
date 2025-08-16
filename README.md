@@ -1,3 +1,5 @@
+[![MSeeP.ai Security Assessment Badge](https://mseep.net/pr/stefanoamorelli-ember-cli-mcp-badge.png)](https://mseep.ai/app/stefanoamorelli-ember-cli-mcp)
+
 # ember-cli-mcp
 
 [![npm version](https://badge.fury.io/js/ember-cli-mcp.svg)](https://www.npmjs.com/package/ember-cli-mcp)
