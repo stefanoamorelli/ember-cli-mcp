@@ -304,6 +304,7 @@ class EmberCliMcpServer {
   private server: Server;
   private runningProcesses: Map<string, any> = new Map();
   private testServerInfo: { port: number; processId: string } | null = null;
+  private buildingProjects: Map<string, { started: number; type: string }> = new Map();
 
   constructor() {
     this.server = new Server(
@@ -422,8 +423,26 @@ class EmberCliMcpServer {
           },
         },
         {
+          name: "ember_build_test",
+          description: "Build the app for test environment (creates dist/ with test files)",
+          inputSchema: {
+            type: "object" as const,
+            properties: {
+              cwd: {
+                type: "string" as const,
+                description: "Working directory",
+              },
+              force: {
+                type: "boolean" as const,
+                description: "Force rebuild even if dist exists",
+                default: false,
+              },
+            },
+          },
+        },
+        {
           name: "ember_test_server_run",
-          description: "Run tests using pre-built test files (requires ember_test_server_start or ember build --environment=test to be run first)",
+          description: "Run tests using pre-built test files (automatically builds if needed, uses --path to avoid recompilation)",
           inputSchema: {
             type: "object" as const,
             properties: {
@@ -505,6 +524,10 @@ class EmberCliMcpServer {
 
         if (name === "ember_test_server_run") {
           return await this.runTestsOnServer(args as any);
+        }
+
+        if (name === "ember_build_test") {
+          return await this.buildForTest(args as any);
         }
 
         if (name.startsWith("ember_")) {
@@ -666,6 +689,14 @@ class EmberCliMcpServer {
     });
 
     this.runningProcesses.set(processId, child);
+
+    // Track test servers specifically
+    if (command.includes('test') && command.includes('--server')) {
+      // Extract port from command if specified
+      const portMatch = command.match(/--test-port\s+(\d+)/);
+      const port = portMatch ? parseInt(portMatch[1]) : 7357;
+      this.testServerInfo = { port, processId };
+    }
 
     let output = "";
     let errorOutput = "";
@@ -1100,6 +1131,88 @@ Usage Examples:
     });
   }
   
+  private async buildForTest(args: { cwd?: string; force?: boolean }) {
+    const cwd = args.cwd || process.cwd();
+    const force = args.force || false;
+    
+    // Check if a build is already in progress
+    const existingBuild = this.buildingProjects.get(cwd);
+    if (existingBuild) {
+      const elapsed = Date.now() - existingBuild.started;
+      const elapsedSeconds = Math.floor(elapsed / 1000);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `⏳ A ${existingBuild.type} build is already in progress (${elapsedSeconds}s elapsed).\n\n` +
+                  `Please wait for it to complete before starting another build.`,
+          },
+        ],
+      };
+    }
+    
+    // Check if dist already exists and has test files
+    const distPath = path.join(cwd, "dist");
+    const testsPath = path.join(distPath, "tests");
+    
+    if (!force) {
+      try {
+        await fs.access(testsPath);
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `✅ Test build already exists at ${distPath}\n\n` +
+                    `Use --force to rebuild, or run ember_test_server_run to execute tests.`,
+            },
+          ],
+        };
+      } catch {
+        // Tests don't exist, we need to build
+      }
+    }
+    
+    // Start the build
+    this.buildingProjects.set(cwd, { started: Date.now(), type: 'test' });
+    
+    try {
+      const startTime = Date.now();
+      
+      const { stdout, stderr } = await execAsync(`ember build --environment=test`, {
+        cwd,
+        env: { ...process.env, FORCE_COLOR: "0" },
+        timeout: 120000 // 2 minute timeout
+      });
+      
+      const buildTime = ((Date.now() - startTime) / 1000).toFixed(1);
+      this.buildingProjects.delete(cwd);
+      
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `✅ Test build completed in ${buildTime}s!\n\n` +
+                  `Output directory: ${distPath}\n` +
+                  `You can now run tests with: ember_test_server_run\n\n` +
+                  (stdout || stderr || "Build completed successfully."),
+          },
+        ],
+      };
+    } catch (error: any) {
+      this.buildingProjects.delete(cwd);
+      
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `❌ Build failed: ${error.message}\n\n${error.stdout || error.stderr || ""}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+  
   private async runTestsOnServer(args: { 
     filter?: string; 
     module?: string; 
@@ -1109,22 +1222,74 @@ Usage Examples:
     const cwd = args.cwd || process.cwd();
     const reporter = args.reporter || "tap";
     
-    // Check if dist directory exists (from test build)
-    const distPath = path.join(cwd, "dist");
-    try {
-      await fs.access(distPath);
-    } catch {
+    // Check if a build is already in progress for this project
+    const existingBuild = this.buildingProjects.get(cwd);
+    if (existingBuild) {
+      const elapsed = Date.now() - existingBuild.started;
+      const elapsedSeconds = Math.floor(elapsed / 1000);
       return {
         content: [
           {
             type: "text" as const,
-            text: `No test build found at ${distPath}.\n\nRun 'ember_test_server_start' first to create a test build, or run 'ember build --environment=test' manually.`,
+            text: `⏳ A ${existingBuild.type} build is already in progress for this project (${elapsedSeconds}s elapsed).\n\n` +
+                  `Please wait for it to complete or run this command again in a few moments.\n` +
+                  `The build typically takes 10-30 seconds depending on project size.`,
           },
         ],
       };
     }
     
-    // Build the ember test command with --path to use existing build
+    // Always look for the dist directory with test build
+    const distPath = path.join(cwd, "dist");
+    
+    let needsBuild = false;
+    try {
+      await fs.access(distPath);
+      // Check if the dist has test files
+      const testsPath = path.join(distPath, "tests");
+      try {
+        await fs.access(testsPath);
+      } catch {
+        needsBuild = true; // dist exists but no test files
+      }
+    } catch {
+      needsBuild = true; // no dist at all
+    }
+    
+    if (needsBuild) {
+      // Mark that we're building
+      this.buildingProjects.set(cwd, { started: Date.now(), type: 'test' });
+      
+      try {
+        // Inform user that build is starting
+        console.log("🔨 Building test environment... This may take 10-30 seconds.");
+        
+        const buildOutput = await execAsync(`ember build --environment=test`, {
+          cwd,
+          env: { ...process.env, FORCE_COLOR: "0" },
+          timeout: 120000 // 2 minute timeout for build
+        });
+        
+        // Build completed successfully
+        this.buildingProjects.delete(cwd);
+        console.log("✅ Test build completed successfully!");
+        
+      } catch (buildError: any) {
+        // Build failed, clean up tracking
+        this.buildingProjects.delete(cwd);
+        
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `❌ Failed to build test environment: ${buildError.message}\n\nPlease ensure you're in an Ember project directory with all dependencies installed.`,
+            },
+          ],
+        };
+      }
+    }
+    
+    // Now run tests using the pre-built dist directory
     const testArgs = ["test", "--path", distPath, "--reporter", reporter];
     
     if (args.filter) {
@@ -1138,7 +1303,8 @@ Usage Examples:
       // Run tests using the pre-built dist directory
       const { stdout, stderr } = await execAsync(`ember ${testArgs.join(" ")}`, { 
         cwd,
-        env: { ...process.env, CI: "true" } // Set CI to avoid browser launch
+        env: { ...process.env, CI: "true" }, // Set CI to avoid browser launch
+        timeout: 60000 // 1 minute timeout for test run
       });
       
       return {
@@ -1156,7 +1322,7 @@ Usage Examples:
         content: [
           {
             type: "text" as const,
-            text: `Test run completed with errors:\n\n${output}`,
+            text: output,
           },
         ],
       };
