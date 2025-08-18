@@ -1293,10 +1293,10 @@ Usage Examples:
     const testArgs = ["test", "--path", distPath, "--reporter", reporter];
     
     if (args.filter) {
-      testArgs.push("--filter", args.filter);
+      testArgs.push("--filter", `"${args.filter}"`);
     }
     if (args.module) {
-      testArgs.push("--module", args.module);
+      testArgs.push("--module", `"${args.module}"`);
     }
     
     try {
